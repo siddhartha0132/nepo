@@ -1,0 +1,322 @@
+"""Waypoint API routes."""
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from fastapi import APIRouter, HTTPException, status
+
+from .. import config
+from ..agent.solver import Solver
+from ..db.packagepro import PackageProDB
+from ..db.session import SessionDB
+from ..models import (
+    CityModel,
+    ConfirmRequest,
+    HealthModel,
+    LanguageModel,
+    NegotiateRequest,
+    PlannerRequest,
+    RealityCheckRequest,
+    SelectGuideRequest,
+    SwapRequest,
+)
+
+router = APIRouter()
+
+
+def _pro() -> PackageProDB:
+    from ..main import get_pro
+
+    return get_pro()
+
+
+def _sessions() -> SessionDB:
+    from ..main import get_sessions
+
+    return get_sessions()
+
+
+def _solver() -> Solver:
+    return Solver(_pro(), _sessions())
+
+
+@router.get("/health", response_model=HealthModel)
+def health() -> HealthModel:
+    pro = _pro()
+    return HealthModel(
+        status="ok",
+        packagepro_db="connected (read-only)",
+        packagepro_path=pro.path,
+        session_db=_sessions().path,
+        rows=pro.table_counts(),
+        ai_key_configured=bool(config.AI_API_KEY),
+    )
+
+
+@router.get("/cities", response_model=list[CityModel])
+def cities(limit: int = 200) -> list[CityModel]:
+    rows = _pro().cities(limit=limit)
+    return [CityModel(**r) for r in rows]
+
+
+@router.get("/languages", response_model=list[LanguageModel])
+def languages() -> list[LanguageModel]:
+    rows = _pro().languages()
+    return [
+        LanguageModel(
+            bcp47=r["bcp47"],
+            english_name=r["english_name"],
+            native_name=r["native_name"],
+            script=r["script"],
+        )
+        for r in rows
+    ]
+
+
+@router.get("/city-packages/{city_id}")
+def city_packages(city_id: str) -> list[dict[str, Any]]:
+    """Available packages for a city — durations, themes, price ranges.
+
+    The frontend uses this to hint valid date ranges and budget when the
+    user selects a destination.
+    """
+    pro = _pro()
+    packages = pro.packages_by_city(city_id)
+    out = []
+    for p in packages:
+        from ..services import pricing as _pricing
+        comps = pro.components(p["package_id"])
+        total = _pricing.included_total(p["base_price"], comps)
+        out.append({
+            "package_id": p["package_id"],
+            "name": p["name"],
+            "theme": p["theme"],
+            "tier": p["tier"],
+            "duration_days": int(p["duration_days"]),
+            "base_price": str(p["base_price"]),
+            "included_total": f"{total:.2f}",
+            "currency": p["currency"],
+            "min_group_size": int(p["min_group_size"]),
+            "max_group_size": int(p["max_group_size"]),
+            "languages_offered": [t.strip() for t in (p["languages_offered"] or "").split(",") if t.strip()],
+        })
+    return out
+
+
+@router.post("/planner/recommend")
+def recommend(request: PlannerRequest) -> dict[str, Any]:
+    solver = _solver()
+    try:
+        return solver.plan(request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+
+@router.post("/sessions/{session_id}/select-package")
+def select_package(session_id: str, package_id: str) -> dict[str, Any]:
+    solver = _solver()
+    try:
+        return solver.select_package(session_id, package_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.get("/sessions/{session_id}")
+def get_session(session_id: str) -> dict[str, Any]:
+    s = _sessions().get_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    return _solver()._session_view(session_id)
+
+
+@router.get("/sessions/{session_id}/itinerary")
+def get_itinerary(session_id: str) -> dict[str, Any]:
+    from ..services.itinerary import ItineraryService
+
+    try:
+        it = ItineraryService(_pro(), _sessions(), session_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return it.itinerary().model_dump()
+
+
+@router.post("/sessions/{session_id}/swap-component")
+def swap_component(session_id: str, request: SwapRequest) -> dict[str, Any]:
+    solver = _solver()
+    try:
+        return solver.swap(session_id, request.component_id, request.replacement_component_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post("/sessions/{session_id}/select-guide")
+def select_guide(session_id: str, request: SelectGuideRequest) -> dict[str, Any]:
+    solver = _solver()
+    try:
+        return solver.select_guide(session_id, request.guide_id, request.service)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post("/sessions/{session_id}/negotiate")
+def negotiate(session_id: str, request: NegotiateRequest) -> dict[str, Any]:
+    solver = _solver()
+    try:
+        return solver.negotiate(
+            session_id,
+            request.option,
+            new_budget=request.new_budget.amount if request.new_budget else None,
+        )
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.get("/sessions/{session_id}/trust-receipt")
+def trust_receipt(session_id: str) -> dict[str, Any]:
+    solver = _solver()
+    try:
+        return solver.trust_receipt(session_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post("/sessions/{session_id}/confirm")
+def confirm(session_id: str, request: Optional[ConfirmRequest] = None) -> dict[str, Any]:
+    """Body is optional: POST with no payload or `{}` both confirm the session."""
+    solver = _solver()
+    try:
+        return solver.confirm(session_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.get("/sessions/{session_id}/guides")
+def session_guides(session_id: str) -> dict[str, Any]:
+    """Guides matched to this session's city, language, theme and dates."""
+    from ..services.guides import match_guides, to_guide_model
+
+    s = _sessions().get_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    entries = match_guides(
+        _pro(),
+        s["city_id"],
+        s["request"]["preferred_languages"],
+        s.get("theme"),
+        s["start_date"],
+        s["end_date"],
+    )
+    return {
+        "session_id": session_id,
+        "guides": [
+            to_guide_model(e, selected=(e["guide"]["guide_id"] == s.get("selected_guide_id"))).model_dump()
+            for e in entries
+        ],
+    }
+
+
+@router.get("/sessions/{session_id}/flights")
+def session_flights(session_id: str) -> dict[str, Any]:
+    """Search flight offers via AmadeusFlightAdapter."""
+    solver = _solver()
+    try:
+        flights = solver.get_flights(session_id)
+        return {"session_id": session_id, "flights": flights}
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+
+
+@router.post("/sessions/{session_id}/select-flight")
+def select_flight(session_id: str, flight: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Add/replace flight in itinerary, routed through BudgetGuard."""
+    solver = _solver()
+    try:
+        return solver.select_flight(session_id, flight)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.get("/sessions/{session_id}/hotels")
+def session_hotels(session_id: str) -> dict[str, Any]:
+    """Fetch hotel rooms via HotelbedsAdapter."""
+    solver = _solver()
+    try:
+        hotels = solver.get_hotels(session_id)
+        return {"session_id": session_id, "hotels": hotels}
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+
+
+@router.post("/sessions/{session_id}/select-hotel")
+def select_hotel(session_id: str, hotel: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Add/upgrade hotel room in itinerary, routed through BudgetGuard."""
+    solver = _solver()
+    try:
+        return solver.select_hotel(session_id, hotel)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post("/reality-check")
+def reality_check(request: RealityCheckRequest) -> dict[str, Any]:
+    """Pre-planning sanity check: compare user budget vs market benchmark.
+
+    Works before any session exists — caller supplies destination,
+    duration and budget. Returns verdict (comfortable/tight/unrealistic),
+    gap analysis, and a multilingual AI explanation.
+    """
+    from decimal import Decimal
+    from ..services.reality import compare_budget_to_market
+
+    try:
+        return compare_budget_to_market(
+            pro=_pro(),
+            destination=request.destination,
+            duration_days=request.duration_days,
+            budget_cap=Decimal(request.budget.amount),
+            currency=request.budget.currency,
+            language=request.language,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+
+@router.post("/sessions/{session_id}/suggest-plan")
+def suggest_plan(session_id: str) -> dict[str, Any]:
+    """Proactive AI plan suggestion triggered when destination is confirmed.
+
+    Searches flights + hotels via provider dispatcher (mock or live),
+    scores packages via recommender, matches guide, enforces BudgetGuard,
+    and returns a fully-grounded complete itinerary suggestion.
+    Persists flight_options, hotel_options and suggested_plan to the session.
+    """
+    from ..services.suggested_plan import suggest_plan_for_session
+
+    try:
+        return suggest_plan_for_session(_pro(), _sessions(), session_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
