@@ -1,4 +1,56 @@
-# Waypoint — budget-honest trip planning
+# RNG Gods
+
+**KogniVera Hackathon 2026**
+
+**Problem statement:** PS-04 — PackagePro: Dynamic Tour Packages
+**College:** BMS College Of Engineering
+
+## What we built
+
+- Budget-honest trip planning with a server-enforced cap.
+- A flight, package, guide, review, and confirmation flow.
+- Grounded guide matching and itinerary summaries using committed fixtures only.
+
+## Architecture
+
+`React/Vite frontend ↔ FastAPI backend ↔ SQLite canonical-style seed data`; a single backend budget guard protects every priced selection.
+
+## Data model
+
+See [data-model/DATA_MODEL.md](data-model/DATA_MODEL.md) for the D1–D9 mapping and additions. PackagePro field names such as `display_name`, `title`, `price_delta`, and `is_swappable` are retained.
+
+## AI features
+
+- A grounded itinerary assistant uses the selected package, items, and guide only; its prompt contract is in `ai/prompts/itinerary_summary.md`.
+- Guide matching filters/ranks local fixture data by city, language, specialization, and rating.
+
+## Run it locally
+
+```bash
+cd backend && python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn src.main:app --reload --port 9000
+# separate terminal
+cd frontend && npm install && npm run dev
+```
+
+Open `http://localhost:5174`. The API seeds SQLite automatically from committed data.
+
+## Demo path
+
+Create a Bengaluru → Jaipur trip with ₹30,000; choose a flight and package; choose or skip a guide; resolve any budget negotiation; then confirm the trip and generate its grounded summary.
+
+## Tests / proof
+
+```bash
+cd backend && python -m pytest ../tests -q
+```
+
+The integration proof checks that an over-budget package blocks confirmation, then a cheaper package can be selected and confirmed.
+
+---
+
+# Original project notes
 
 A from-scratch rebuild of the PS-04 "PackagePro — Dynamic Tour Packages"
 concept, built around one bet: the thing missing from AI trip planners
