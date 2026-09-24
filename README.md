@@ -118,8 +118,8 @@ Full details: [`data-model/DATA_MODEL.md`](data-model/DATA_MODEL.md)
 
 ```bash
 # Clone
-git clone https://github.com/DevodG/KogniVera.git
-cd KogniVera
+git clone https://github.com/siddhartha0132/nepo.git
+cd nepo
 
 # Backend
 cd backend
@@ -173,7 +173,7 @@ source .venv/bin/activate
 python3 -m pytest -q
 ```
 
-**100 tests** covering:
+**121 automated tests** covering:
 
 | Test file | What it proves |
 |-----------|---------------|
