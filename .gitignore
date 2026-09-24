@@ -25,6 +25,8 @@ dist/
 waypoint_sessions.db
 waypoint_sessions.db-journal
 waypoint_sessions.db-wal
+# Local database created by the earlier lightweight demo; not canonical data.
+packagepro.sqlite3
 
 # IDE
 .vscode/
